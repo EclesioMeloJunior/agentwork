@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# =============================================================================
+# agentwork - Lightweight Git Worktree Manager for AI Agent Workflows
+# =============================================================================
+
+WORKTREE_DIR=".worktrees"
+BRANCH_PREFIX="agent"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+get_repo_root() {
+    git rev-parse --show-toplevel 2>/dev/null || {
+        echo -e "${RED}Error: Not in a git repository${NC}" >&2
+        exit 1
+    }
+}
+
+ensure_dirs() {
+    local root
+    root=$(get_repo_root)
+    mkdir -p "$root/$WORKTREE_DIR"
+}
+
+# Create a new worktree branching from the current branch
+cmd_new() {
+    local task_name="${1:-}"
+
+    if [[ -z "$task_name" ]]; then
+        echo -e "${RED}Error: Task name required${NC}"
+        echo "Usage: agentwork new <task-name>"
+        exit 1
+    fi
+
+    local root
+    root=$(get_repo_root)
+    ensure_dirs
+
+    local current_branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD)
+    local branch_name="$BRANCH_PREFIX/$task_name"
+    local worktree_path="$root/$WORKTREE_DIR/$task_name"
+
+    if [[ -d "$worktree_path" ]]; then
+        echo -e "${YELLOW}Worktree already exists: $worktree_path${NC}"
+        exit 1
+    fi
+
+    echo -e "${BLUE}Creating worktree for task: $task_name${NC}"
+    echo -e "  From:   $current_branch"
+    echo -e "  Branch: $branch_name"
+    echo -e "  Path:   $worktree_path"
+
+    git worktree add -b "$branch_name" "$worktree_path" "$current_branch"
+
+    echo -e "\n${GREEN}✓ Ready${NC}"
+    echo -e "  cd $worktree_path"
+}
+
+# List all agent worktrees
+cmd_list() {
+    local root
+    root=$(get_repo_root)
+
+    if [[ ! -d "$root/$WORKTREE_DIR" ]] || [[ -z "$(ls -A "$root/$WORKTREE_DIR" 2>/dev/null)" ]]; then
+        echo -e "${YELLOW}No agent worktrees${NC}"
+        return
+    fi
+
+    for dir in "$root/$WORKTREE_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        local name
+        name=$(basename "$dir")
+        local branch
+        branch=$(git -C "$dir" branch --show-current 2>/dev/null || echo "unknown")
+        local status
+        status=$(git -C "$dir" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+
+        if [[ "$status" -gt 0 ]]; then
+            echo -e "  ${GREEN}●${NC} $name (${CYAN}$branch${NC}) ${YELLOW}$status changed${NC}"
+        else
+            echo -e "  ${GREEN}●${NC} $name (${CYAN}$branch${NC}) clean"
+        fi
+    done
+}
+
+# Show status of all worktrees
+cmd_status() {
+    local root
+    root=$(get_repo_root)
+
+    if [[ ! -d "$root/$WORKTREE_DIR" ]] || [[ -z "$(ls -A "$root/$WORKTREE_DIR" 2>/dev/null)" ]]; then
+        echo -e "${YELLOW}No agent worktrees${NC}"
+        return
+    fi
+
+    for dir in "$root/$WORKTREE_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        local name
+        name=$(basename "$dir")
+        local branch
+        branch=$(git -C "$dir" branch --show-current 2>/dev/null || echo "unknown")
+        local base
+        base=$(git -C "$dir" merge-base --fork-point main HEAD 2>/dev/null || echo "")
+        local ahead="?"
+        if [[ -n "$base" ]]; then
+            ahead=$(git -C "$dir" rev-list --count "$base"..HEAD 2>/dev/null || echo "?")
+        fi
+
+        echo -e "${CYAN}$name${NC} ($branch) — $ahead commits ahead"
+        git -C "$dir" status --short 2>/dev/null | sed 's/^/  /'
+        echo
+    done
+}
+
+# Remove a worktree
+cmd_clean() {
+    local task_name="${1:-}"
+
+    if [[ -z "$task_name" ]]; then
+        echo -e "${RED}Error: Task name required${NC}"
+        exit 1
+    fi
+
+    local root
+    root=$(get_repo_root)
+    local worktree_path="$root/$WORKTREE_DIR/$task_name"
+
+    if [[ ! -d "$worktree_path" ]]; then
+        echo -e "${RED}Error: Worktree not found: $task_name${NC}"
+        exit 1
+    fi
+
+    local changes
+    changes=$(git -C "$worktree_path" status --porcelain 2>/dev/null)
+    if [[ -n "$changes" ]]; then
+        echo -e "${YELLOW}Warning: uncommitted changes in $task_name${NC}"
+        echo "$changes" | sed 's/^/  /'
+        read -p "Remove anyway? [y/N] " -n 1 -r
+        echo
+        [[ $REPLY =~ ^[Yy]$ ]] || exit 1
+    fi
+
+    git worktree remove "$worktree_path" --force
+    echo -e "${GREEN}✓ Removed $task_name${NC}"
+}
+
+# Remove all worktrees
+cmd_cleanall() {
+    local root
+    root=$(get_repo_root)
+
+    if [[ ! -d "$root/$WORKTREE_DIR" ]]; then
+        echo "No worktrees to clean"
+        exit 0
+    fi
+
+    echo -e "${YELLOW}Remove ALL agent worktrees?${NC}"
+    read -p "[y/N] " -n 1 -r
+    echo
+    [[ $REPLY =~ ^[Yy]$ ]] || exit 1
+
+    for dir in "$root/$WORKTREE_DIR"/*/; do
+        [[ -d "$dir" ]] || continue
+        local name
+        name=$(basename "$dir")
+        echo "  removing $name"
+        git worktree remove "$dir" --force 2>/dev/null || rm -rf "$dir"
+    done
+
+    git worktree prune
+    echo -e "${GREEN}✓ Done${NC}"
+}
+
+cmd_help() {
+    cat << 'EOF'
+agentwork - Lightweight Git Worktree Manager
+
+Usage:
+  agentwork new <task>     Create worktree from current branch
+  agentwork list           List all agent worktrees
+  agentwork status         Show detailed status
+  agentwork clean <task>   Remove a worktree
+  agentwork cleanall       Remove all worktrees
+  agentwork help           Show this help
+
+Example:
+  git checkout develop
+  agentwork new fix-parser
+  cd .worktrees/fix-parser
+  # ... work ...
+  agentwork clean fix-parser
+EOF
+}
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    case "$cmd" in
+        new)           cmd_new "$@" ;;
+        list|ls)       cmd_list "$@" ;;
+        status|st)     cmd_status "$@" ;;
+        clean|rm)      cmd_clean "$@" ;;
+        cleanall)      cmd_cleanall "$@" ;;
+        help|-h|--help) cmd_help ;;
+        *)
+            echo -e "${RED}Unknown command: $cmd${NC}"
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
